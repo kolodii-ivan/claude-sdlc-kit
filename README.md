@@ -205,6 +205,31 @@ export default defineConfig({
 });
 ```
 
+## Verifying the kit
+
+Run the bundled test suite to verify everything is wired up correctly:
+
+```bash
+bash sdlc-kit/tests/run-all.sh
+```
+
+It runs two test scripts:
+
+| Script | What it checks |
+|---|---|
+| `tests/smoke.sh` | Installs the kit into a throwaway tmp repo using `SDLC_KIT_LOCAL_SOURCE`, then asserts: every expected file is present, every YAML parses, every bash script passes `bash -n`, the JS file passes `node --check`, config template substitution worked (no leftover `__PLACEHOLDER__` tokens), bot identity was patched into all three workflows, and `.gitignore` was appended. |
+| `tests/load-config-roundtrip.sh` | Feeds a representative `.claude/config.yml` into `load-config.sh` and asserts every documented key is exported to `GITHUB_ENV` with the expected value. Skips if `yq` is not installed. |
+
+Requirements on the host: `bash`, `git`, `ruby` (for YAML parsing), `node` (for JSON + JS syntax checks). Optional: `yq` (for the load-config roundtrip).
+
+The installer also supports two env vars that the smoke test relies on — they're useful if you ever want to install the kit from a local checkout:
+
+```bash
+SDLC_KIT_LOCAL_SOURCE=/path/to/sdlc-kit bash install.sh   # skip the git clone
+SDLC_KIT_ISSUE_PREFIX=LP SDLC_KIT_PREVIEW_PROVIDER=none \
+  bash install.sh                                          # non-interactive prompts
+```
+
 ## Known gotchas
 
 These bit us during development. The kit handles all of them, but if you're hacking on it:

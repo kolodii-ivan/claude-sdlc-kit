@@ -33,17 +33,28 @@ echo "Installing Claude SDLC kit from ${SOURCE_REPO}@${SOURCE_BRANCH}..."
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 
-if git rev-parse --git-dir >/dev/null 2>&1 && \
-   git ls-remote --exit-code "https://github.com/${SOURCE_REPO}.git" "$SOURCE_BRANCH" >/dev/null 2>&1; then
-  git clone --depth 1 --branch "$SOURCE_BRANCH" "https://github.com/${SOURCE_REPO}.git" "$WORKDIR/source" >/dev/null 2>&1
+# If SDLC_KIT_LOCAL_SOURCE is set, use that directory directly. This is what
+# tests/smoke.sh uses so it can validate the working tree without pushing.
+if [ -n "${SDLC_KIT_LOCAL_SOURCE:-}" ]; then
+  if [ ! -d "$SDLC_KIT_LOCAL_SOURCE" ]; then
+    echo "Error: SDLC_KIT_LOCAL_SOURCE=$SDLC_KIT_LOCAL_SOURCE does not exist." >&2
+    exit 1
+  fi
+  KIT_DIR="$SDLC_KIT_LOCAL_SOURCE"
+  echo "  → Using local kit source at $KIT_DIR"
 else
-  echo "Error: cannot reach ${SOURCE_REPO}@${SOURCE_BRANCH}." >&2
-  exit 1
+  if git rev-parse --git-dir >/dev/null 2>&1 && \
+     git ls-remote --exit-code "https://github.com/${SOURCE_REPO}.git" "$SOURCE_BRANCH" >/dev/null 2>&1; then
+    git clone --depth 1 --branch "$SOURCE_BRANCH" "https://github.com/${SOURCE_REPO}.git" "$WORKDIR/source" >/dev/null 2>&1
+  else
+    echo "Error: cannot reach ${SOURCE_REPO}@${SOURCE_BRANCH}." >&2
+    exit 1
+  fi
+  KIT_DIR="$WORKDIR/source/sdlc-kit"
 fi
 
-KIT_DIR="$WORKDIR/source/sdlc-kit"
 if [ ! -d "$KIT_DIR" ]; then
-  echo "Error: sdlc-kit/ not found in ${SOURCE_REPO}@${SOURCE_BRANCH}." >&2
+  echo "Error: sdlc-kit/ not found at $KIT_DIR." >&2
   exit 1
 fi
 
@@ -77,26 +88,42 @@ if [ -f .claude/config.yml ]; then
   echo "  ⚠ .claude/config.yml already exists — skipping config prompt."
   echo "    Review it manually if you want to change values."
 else
-  echo ""
-  echo "Configure the kit (press Enter to accept defaults):"
-
-  prompt() {
-    local label="$1"
-    local default="$2"
-    local var
-    read -r -p "  $label [$default]: " var </dev/tty
-    printf '%s' "${var:-$default}"
+  # Each value: SDLC_KIT_<NAME> env var wins; else interactive prompt (TTY only);
+  # else the documented default. This lets tests run unattended and lets
+  # power-users pre-seed values via env.
+  resolve() {
+    local var_name="$1"
+    local label="$2"
+    local default="$3"
+    local override
+    override="$(eval "printf '%s' \"\${$var_name:-}\"")"
+    if [ -n "$override" ]; then
+      printf '%s' "$override"
+      return
+    fi
+    if [ -t 0 ] && [ -t 1 ]; then
+      local entered
+      read -r -p "  $label [$default]: " entered </dev/tty
+      printf '%s' "${entered:-$default}"
+    else
+      printf '%s' "$default"
+    fi
   }
 
-  ISSUE_PREFIX=$(prompt "Issue prefix used in commit messages (GH, LP, etc.)" "GH")
-  BRANCH_PREFIX=$(prompt "Branch prefix" "feature")
-  DEFAULT_BRANCH=$(prompt "Default branch" "main")
-  VERIFY_TYPECHECK=$(prompt "Typecheck command" "npm run typecheck")
-  VERIFY_LINT=$(prompt "Lint command" "npm run lint")
-  VERIFY_UNIT_TESTS=$(prompt "Unit test command" "npm test")
-  VERIFY_E2E_TESTS=$(prompt "E2E test command" "npx playwright test")
-  E2E_NEEDS_PREVIEW=$(prompt "Require a live preview before e2e? (true|false)" "true")
-  PREVIEW_PROVIDER=$(prompt "Preview provider (vercel|none|netlify|github-pages)" "vercel")
+  if [ -t 0 ] && [ -t 1 ]; then
+    echo ""
+    echo "Configure the kit (press Enter to accept defaults):"
+  fi
+
+  ISSUE_PREFIX=$(resolve SDLC_KIT_ISSUE_PREFIX      "Issue prefix used in commit messages (GH, LP, etc.)" "GH")
+  BRANCH_PREFIX=$(resolve SDLC_KIT_BRANCH_PREFIX    "Branch prefix" "feature")
+  DEFAULT_BRANCH=$(resolve SDLC_KIT_DEFAULT_BRANCH  "Default branch" "main")
+  VERIFY_TYPECHECK=$(resolve SDLC_KIT_VERIFY_TYPECHECK   "Typecheck command" "npm run typecheck")
+  VERIFY_LINT=$(resolve SDLC_KIT_VERIFY_LINT             "Lint command" "npm run lint")
+  VERIFY_UNIT_TESTS=$(resolve SDLC_KIT_VERIFY_UNIT_TESTS "Unit test command" "npm test")
+  VERIFY_E2E_TESTS=$(resolve SDLC_KIT_VERIFY_E2E_TESTS   "E2E test command" "npx playwright test")
+  E2E_NEEDS_PREVIEW=$(resolve SDLC_KIT_E2E_NEEDS_PREVIEW "Require a live preview before e2e? (true|false)" "true")
+  PREVIEW_PROVIDER=$(resolve SDLC_KIT_PREVIEW_PROVIDER   "Preview provider (vercel|none|netlify|github-pages)" "vercel")
 
   sed \
     -e "s|__ISSUE_PREFIX__|${ISSUE_PREFIX}|g" \
@@ -122,14 +149,14 @@ REPO_REMOTE=$(git config --get remote.origin.url 2>/dev/null || true)
 DEFAULT_BOT_EMAIL="claude-sdlc-bot@noreply.github.com"
 DEFAULT_BOT_NAME="claude-sdlc-bot"
 
-if [ -t 0 ] && [ -t 1 ]; then
+if [ -z "${SDLC_KIT_BOT_EMAIL:-}" ] && [ -z "${SDLC_KIT_BOT_NAME:-}" ] && [ -t 0 ] && [ -t 1 ]; then
   echo ""
   echo "Configure the bot identity used by the workflow to commit (press Enter to accept):"
   read -r -p "  Bot email [${DEFAULT_BOT_EMAIL}]: " BOT_EMAIL </dev/tty
   read -r -p "  Bot name [${DEFAULT_BOT_NAME}]: " BOT_NAME </dev/tty
 fi
-BOT_EMAIL="${BOT_EMAIL:-$DEFAULT_BOT_EMAIL}"
-BOT_NAME="${BOT_NAME:-$DEFAULT_BOT_NAME}"
+BOT_EMAIL="${SDLC_KIT_BOT_EMAIL:-${BOT_EMAIL:-$DEFAULT_BOT_EMAIL}}"
+BOT_NAME="${SDLC_KIT_BOT_NAME:-${BOT_NAME:-$DEFAULT_BOT_NAME}}"
 
 # Replace the hardcoded email/name in each workflow file (POSIX-portable sed).
 for wf in .github/workflows/claude-brainstorm.yml \
