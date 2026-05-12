@@ -1,0 +1,19 @@
+name: "Claude SDLC Config"
+description: "Loads .claude/config.yml and exports keys as env vars to later steps."
+
+runs:
+  using: "composite"
+  steps:
+    - name: Ensure yq present
+      shell: bash
+      run: |
+        if ! command -v yq >/dev/null 2>&1; then
+          echo "yq not found, installing"
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+        fi
+        yq --version
+
+    - name: Load config
+      shell: bash
+      run: ${{ github.action_path }}/scripts/load-config.sh

@@ -1,0 +1,27 @@
+project:
+  issue_prefix: __ISSUE_PREFIX__       # e.g. GH, LP, DEVTECH — used in commit messages
+  branch_prefix: __BRANCH_PREFIX__     # e.g. feature
+  default_branch: __DEFAULT_BRANCH__   # e.g. main, master
+
+verification:
+  typecheck: "__VERIFY_TYPECHECK__"    # e.g. "npm run typecheck"
+  lint: "__VERIFY_LINT__"              # e.g. "npm run lint"
+  unit_tests: "__VERIFY_UNIT_TESTS__"  # e.g. "npm test"
+  e2e_tests: "__VERIFY_E2E_TESTS__"    # e.g. "npx playwright test"
+  e2e_requires_preview: __E2E_NEEDS_PREVIEW__  # true | false — if true, the workflow escalates when no preview is available
+
+preview:
+  provider: __PREVIEW_PROVIDER__       # vercel | none | netlify | github-pages
+  wait_timeout_min: 10                 # how long to wait for preview to reach READY
+
+limits:
+  max_iterations: 5                    # per branch, across implement + iterate runs
+  wall_clock_hours: 2                  # per workflow run (also enforced by GitHub at 6h)
+  stale_brainstorm_days: 7             # how long to wait for a reply before closing
+  brainstorm_max_invocations: 10       # per issue, prevents runaway clarifying loops
+
+triggers:
+  brainstorm_label: needs-spec         # label that triggers brainstorm on existing issues
+  changes_label: needs-changes         # label that triggers iterate Mode B (batched review)
+  skip_label: no-claude                # label that opts an issue out entirely
+  stuck_label: needs-human             # label applied when the kit escalates

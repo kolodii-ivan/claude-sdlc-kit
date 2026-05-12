@@ -1,0 +1,552 @@
+name: Claude Implement
+
+on:
+  repository_dispatch:
+    types: [spec-ready]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "Issue number"
+        required: true
+      branch:
+        description: "Feature branch (origin/<branch>)"
+        required: true
+      slug:
+        description: "Slug (lowercase, hyphenated, <=40 chars)"
+        required: true
+
+concurrency:
+  group: claude-max
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ISSUE_NUMBER: ${{ github.event.client_payload.issue || github.event.inputs.issue }}
+      BRANCH: ${{ github.event.client_payload.branch || github.event.inputs.branch }}
+      SLUG: ${{ github.event.client_payload.slug || github.event.inputs.slug }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.client_payload.branch || github.event.inputs.branch }}
+
+      - uses: ./.github/actions/claude-sdlc-config
+
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.email "pothuyjohn@gmail.com"
+          git config user.name "claude-sdlc-bot"
+
+      - name: Compute today + spec/plan paths
+        id: paths
+        run: |
+          set -euo pipefail
+          TODAY=$(date -u +%Y-%m-%d)
+          SPEC=$(ls docs/superpowers/specs/*-gh${ISSUE_NUMBER}-${SLUG}-design.md 2>/dev/null | head -n1 || true)
+          if [ -z "$SPEC" ]; then
+            echo "::error::No spec found matching docs/superpowers/specs/*-gh${ISSUE_NUMBER}-${SLUG}-design.md"
+            exit 1
+          fi
+          PLAN="docs/superpowers/plans/${TODAY}-gh${ISSUE_NUMBER}-${SLUG}-plan.md"
+          echo "today=$TODAY" >> "$GITHUB_OUTPUT"
+          echo "spec=$SPEC" >> "$GITHUB_OUTPUT"
+          echo "plan=$PLAN" >> "$GITHUB_OUTPUT"
+
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Enforce iteration cap
+        id: cap
+        run: |
+          set -euo pipefail
+          COUNTER_FILE=".claude/implement-iterations"
+          COUNT=0
+          if [ -f "$COUNTER_FILE" ]; then
+            COUNT=$(cat "$COUNTER_FILE")
+          fi
+          COUNT=$((COUNT + 1))
+          echo "$COUNT" > "$COUNTER_FILE"
+          if [ "$COUNT" -gt "$LIMIT_MAX_ITERATIONS" ]; then
+            gh issue comment "$ISSUE_NUMBER" --body "Implementation iteration cap of $LIMIT_MAX_ITERATIONS reached. Labeling \`$TRIGGER_STUCK_LABEL\` for human attention."
+            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            exit 1
+          fi
+          git add "$COUNTER_FILE"
+          git commit -m "wip: Implement iteration $COUNT of $LIMIT_MAX_ITERATIONS | GH-$ISSUE_NUMBER #comment"
+          source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
+          rebind_git_auth
+          git push -u origin "$BRANCH"
+
+      - name: Read plan prompt
+        id: plan_prompt
+        run: |
+          set -euo pipefail
+          {
+            echo 'content<<CLAUDE_PROMPT_EOF'
+            cat .claude/prompts/plan.md
+            echo 'CLAUDE_PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Claude #1 — write plan
+        id: claude_plan
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          allowed_bots: "*"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: --max-turns 30 --allowed-tools "Read,Write,Edit,Glob,Grep,Skill,TodoWrite,Bash"
+          plugin_marketplaces: |
+            https://github.com/anthropics/claude-plugins-official.git
+          plugins: |
+            superpowers@claude-plugins-official
+          prompt: ${{ steps.plan_prompt.outputs.content }}
+        env:
+          SPEC_PATH: ${{ steps.paths.outputs.spec }}
+          BRANCH_NAME: ${{ env.BRANCH }}
+          SLUG: ${{ env.SLUG }}
+          TODAY: ${{ steps.paths.outputs.today }}
+
+      - name: Escalate if Claude #1 errored
+        if: steps.claude_plan.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          gh issue comment "$ISSUE_NUMBER" --body "Plan-phase Claude action exited with error (likely max-turns or context limit). Labeling \`$TRIGGER_STUCK_LABEL\`."
+          gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+          exit 1
+
+      - name: Commit plan
+        run: |
+          set -euo pipefail
+          if [ ! -s /tmp/claude/plan.md ]; then
+            gh issue comment "$ISSUE_NUMBER" --body "Plan phase produced no plan. Labeling \`$TRIGGER_STUCK_LABEL\`."
+            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            exit 1
+          fi
+          PLAN_DST="${{ steps.paths.outputs.plan }}"
+          mkdir -p "$(dirname "$PLAN_DST")"
+          cp /tmp/claude/plan.md "$PLAN_DST"
+          git add "$PLAN_DST"
+          git commit -m "docs: Added implementation plan for issue GH-${ISSUE_NUMBER} | GH-${ISSUE_NUMBER} #time 20m"
+          source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
+          rebind_git_auth
+          git push -u origin "$BRANCH"
+
+      - name: Read implement prompt
+        id: implement_prompt
+        run: |
+          set -euo pipefail
+          {
+            echo 'content<<CLAUDE_PROMPT_EOF'
+            cat .claude/prompts/implement.md
+            echo 'CLAUDE_PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Claude #2 — execute plan
+        id: claude_implement
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          allowed_bots: "*"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: --max-turns 200 --allowed-tools "Read,Write,Edit,Glob,Grep,Skill,TodoWrite,Agent,Bash"
+          plugin_marketplaces: |
+            https://github.com/anthropics/claude-plugins-official.git
+          plugins: |
+            superpowers@claude-plugins-official
+          prompt: ${{ steps.implement_prompt.outputs.content }}
+        env:
+          PLAN_PATH: ${{ steps.paths.outputs.plan }}
+          BRANCH_NAME: ${{ env.BRANCH }}
+          SLUG: ${{ env.SLUG }}
+          TODAY: ${{ steps.paths.outputs.today }}
+
+      - name: Escalate if Claude #2 errored
+        if: steps.claude_implement.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          gh issue comment "$ISSUE_NUMBER" --body "Implement-phase Claude action exited with error (likely max-turns or context limit). Labeling \`$TRIGGER_STUCK_LABEL\`."
+          gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+          exit 1
+
+      - name: Push implementation commits
+        run: |
+          set -euo pipefail
+          # Auto-stage any plan/spec docs Claude wrote but forgot to commit
+          # (the writing-plans skill creates its own plan file at a slightly
+          # different path than the workflow's canonical plan, and it often
+          # lands as untracked).
+          git add -A docs/superpowers/plans/ docs/superpowers/specs/ 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "docs: Auto-staged auxiliary plan/spec from Claude session | GH-${ISSUE_NUMBER} #time 1m"
+          fi
+          DIRTY=$(git status --porcelain)
+          if [ -n "$DIRTY" ]; then
+            DIFF_STAT=$(git diff --stat HEAD 2>/dev/null || echo "(no diff)")
+            gh issue comment "$ISSUE_NUMBER" --body "$(printf 'Implementation phase exited with uncommitted changes:\n\n```\n%s\n```\n\n```\n%s\n```\n\nLabeling `%s`.' "$DIRTY" "$DIFF_STAT" "$TRIGGER_STUCK_LABEL")"
+            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            exit 1
+          fi
+          source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
+          rebind_git_auth
+          git push -u origin "$BRANCH"
+
+      - name: Verify local — attempt 1
+        id: verify_1
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mkdir -p /tmp/claude
+          for CMD_NAME in TYPECHECK LINT UNIT_TESTS; do
+            VAR="VERIFY_${CMD_NAME}"
+            CMD="${!VAR}"
+            LOG="/tmp/claude/verify-${CMD_NAME}.log"
+            if ! eval "$CMD" >"$LOG" 2>&1; then
+              echo "FAILED_LOG=$LOG" >> "$GITHUB_ENV"
+              echo "failed=true" >> "$GITHUB_OUTPUT"
+              tail -50 "$LOG"
+              exit 1
+            fi
+          done
+          echo "failed=false" >> "$GITHUB_OUTPUT"
+
+      - name: Read debug prompt (local)
+        if: steps.verify_1.outputs.failed == 'true'
+        id: debug_prompt_local
+        run: |
+          set -euo pipefail
+          {
+            echo 'content<<CLAUDE_PROMPT_EOF'
+            cat .claude/prompts/debug.md
+            echo 'CLAUDE_PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Claude #3 — debug local verification
+        if: steps.verify_1.outputs.failed == 'true'
+        id: claude_debug_local
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          allowed_bots: "*"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: --max-turns 60 --allowed-tools "Read,Write,Edit,Glob,Grep,Skill,TodoWrite,Bash"
+          plugin_marketplaces: |
+            https://github.com/anthropics/claude-plugins-official.git
+          plugins: |
+            superpowers@claude-plugins-official
+          prompt: ${{ steps.debug_prompt_local.outputs.content }}
+        env:
+          FAILURE_LOG_PATH: ${{ env.FAILED_LOG }}
+          BRANCH_NAME: ${{ env.BRANCH }}
+
+      - name: Escalate if Claude #3 (local) errored
+        if: steps.claude_debug_local.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          BODY="Local-debug Claude action exited with error (likely max-turns). Labeling \`$TRIGGER_STUCK_LABEL\`."
+          if [ -f /tmp/claude/hypothesis.md ]; then
+            HYPO=$(cat /tmp/claude/hypothesis.md)
+            BODY="$BODY"$'\n\n''Hypothesis from agent:'$'\n\n'"$HYPO"
+          fi
+          gh issue comment "$ISSUE_NUMBER" --body "$BODY"
+          gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+          exit 1
+
+      - name: Push debug commits (local)
+        if: steps.verify_1.outputs.failed == 'true'
+        run: |
+          set -euo pipefail
+          DIRTY=$(git status --porcelain)
+          if [ -n "$DIRTY" ]; then
+            DIFF_STAT=$(git diff --stat HEAD 2>/dev/null || echo "(no diff)")
+            gh issue comment "$ISSUE_NUMBER" --body "$(printf 'Debug agent exited with uncommitted changes:\n\n```\n%s\n```\n\n```\n%s\n```\n\nLabeling `%s`.' "$DIRTY" "$DIFF_STAT" "$TRIGGER_STUCK_LABEL")"
+            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            exit 1
+          fi
+          source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
+          rebind_git_auth
+          git push -u origin "$BRANCH"
+
+      - name: Verify local — attempt 2 (final)
+        if: steps.verify_1.outputs.failed == 'true'
+        run: |
+          set -euo pipefail
+          for CMD_NAME in TYPECHECK LINT UNIT_TESTS; do
+            VAR="VERIFY_${CMD_NAME}"
+            CMD="${!VAR}"
+            LOG="/tmp/claude/verify-${CMD_NAME}.log"
+            if ! eval "$CMD" >"$LOG" 2>&1; then
+              echo "::error::$CMD_NAME failed on attempt 2"
+              echo "----- $LOG (last 50 lines) -----"
+              tail -50 "$LOG"
+              echo "----- end of log -----"
+              FAIL_TAIL=$(tail -50 "$LOG")
+              gh issue comment "$ISSUE_NUMBER" --body "$(printf 'Local verification still failing after debug attempt: **%s**\n\n```\n%s\n```\n\nLabeling `%s`.' "$CMD_NAME" "$FAIL_TAIL" "$TRIGGER_STUCK_LABEL")"
+              gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+              exit 1
+            fi
+          done
+
+      - name: Open or refresh draft PR
+        id: pr
+        run: |
+          set -euo pipefail
+          ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --json title --jq '.title')
+          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+            echo "PR already exists for $BRANCH"
+          else
+            SPEC_SUMMARY=$(awk 'BEGIN{n=0} /^## /{n++} n<=2 && !/^## /' "${{ steps.paths.outputs.spec }}" | head -c 2000)
+            VERIFY_TAIL=$(tail -n 10 /tmp/claude/verify-TYPECHECK.log 2>/dev/null || echo "n/a")
+            {
+              printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n%s\n%s\n\n%s\n' \
+                "## Summary" \
+                "$SPEC_SUMMARY" \
+                "## Plan" \
+                "See \`${{ steps.paths.outputs.plan }}\`." \
+                "## Verification" \
+                '```' \
+                "$VERIFY_TAIL" \
+                '```' \
+                "Closes #${ISSUE_NUMBER}"
+            } > /tmp/claude/pr-body.md
+            gh pr create --draft \
+              --base "$DEFAULT_BRANCH" \
+              --head "$BRANCH" \
+              --title "feature: ${ISSUE_TITLE} | GH-${ISSUE_NUMBER}" \
+              --body-file /tmp/claude/pr-body.md
+          fi
+
+      - name: Capture branch SHA before preview
+        id: sha_pre_preview
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Preview wait
+        id: preview
+        uses: ./.github/actions/preview-wait-vercel
+        with:
+          commit_sha: ${{ steps.sha_pre_preview.outputs.sha }}
+          timeout_min: ${{ env.PREVIEW_WAIT_TIMEOUT }}
+
+      - name: Decide e2e mode
+        id: e2e_mode
+        run: |
+          set -euo pipefail
+          READY="${{ steps.preview.outputs.ready }}"
+          PREVIEW_URL="${{ steps.preview.outputs.preview_url }}"
+          if [ "$READY" = "true" ]; then
+            echo "mode=preview" >> "$GITHUB_OUTPUT"
+            echo "base_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
+          elif [ "$READY" = "skipped" ] && [ "$VERIFY_E2E_NEEDS_PREVIEW" = "true" ]; then
+            gh issue comment "$ISSUE_NUMBER" --body "Preview provider is none but config requires preview for e2e. Labeling \`$TRIGGER_STUCK_LABEL\`."
+            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            exit 1
+          elif [ "$READY" = "skipped" ]; then
+            echo "mode=localhost" >> "$GITHUB_OUTPUT"
+            echo "base_url=http://localhost:3000" >> "$GITHUB_OUTPUT"
+          else
+            gh issue comment "$ISSUE_NUMBER" --body "Preview wait failed (ready=$READY). Labeling \`$TRIGGER_STUCK_LABEL\`."
+            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            exit 1
+          fi
+
+      - name: Run e2e — attempt 1
+        id: e2e_1
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          MODE="${{ steps.e2e_mode.outputs.mode }}"
+          BASE_URL="${{ steps.e2e_mode.outputs.base_url }}"
+          if [ "$MODE" = "localhost" ]; then
+            npm run build
+            nohup npm start >/tmp/claude/local-server.log 2>&1 &
+            echo $! > /tmp/claude/local-server.pid
+            for _ in $(seq 1 30); do
+              if curl -sSf http://localhost:3000 >/dev/null 2>&1; then break; fi
+              sleep 2
+            done
+          fi
+          if PLAYWRIGHT_TEST_BASE_URL="$BASE_URL" $VERIFY_E2E_TESTS \
+              >/tmp/claude/verify-E2E.log 2>&1; then
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          else
+            tail -100 /tmp/claude/verify-E2E.log
+            echo "FAILED_LOG=/tmp/claude/verify-E2E.log" >> "$GITHUB_ENV"
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f /tmp/claude/local-server.pid ]; then
+            kill "$(cat /tmp/claude/local-server.pid)" 2>/dev/null || true
+          fi
+          echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Read debug prompt (e2e)
+        if: steps.e2e_1.outputs.failed == 'true'
+        id: debug_prompt_e2e
+        run: |
+          set -euo pipefail
+          {
+            echo 'content<<CLAUDE_PROMPT_EOF'
+            cat .claude/prompts/debug.md
+            echo 'CLAUDE_PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Claude #3 — debug e2e
+        if: steps.e2e_1.outputs.failed == 'true'
+        id: claude_debug_e2e
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          allowed_bots: "*"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: --max-turns 60 --allowed-tools "Read,Write,Edit,Glob,Grep,Skill,TodoWrite,Bash"
+          plugin_marketplaces: |
+            https://github.com/anthropics/claude-plugins-official.git
+          plugins: |
+            superpowers@claude-plugins-official
+          prompt: ${{ steps.debug_prompt_e2e.outputs.content }}
+        env:
+          FAILURE_LOG_PATH: ${{ env.FAILED_LOG }}
+          BRANCH_NAME: ${{ env.BRANCH }}
+
+      - name: Escalate if Claude #3 (e2e) errored
+        if: steps.claude_debug_e2e.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          BODY="E2E-debug Claude action exited with error (likely max-turns). Labeling \`$TRIGGER_STUCK_LABEL\`."
+          if [ -f /tmp/claude/hypothesis.md ]; then
+            HYPO=$(cat /tmp/claude/hypothesis.md)
+            BODY="$BODY"$'\n\n''Hypothesis from agent:'$'\n\n'"$HYPO"
+          fi
+          gh issue comment "$ISSUE_NUMBER" --body "$BODY"
+          gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+          exit 1
+
+      - name: Push e2e debug commits
+        if: steps.e2e_1.outputs.failed == 'true'
+        run: |
+          set -euo pipefail
+          DIRTY=$(git status --porcelain)
+          if [ -n "$DIRTY" ]; then
+            DIFF_STAT=$(git diff --stat HEAD 2>/dev/null || echo "(no diff)")
+            gh issue comment "$ISSUE_NUMBER" --body "$(printf 'Debug agent (e2e) exited with uncommitted changes:\n\n```\n%s\n```\n\n```\n%s\n```\n\nLabeling `%s`.' "$DIRTY" "$DIFF_STAT" "$TRIGGER_STUCK_LABEL")"
+            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            exit 1
+          fi
+          source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
+          rebind_git_auth
+          git push -u origin "$BRANCH"
+
+      - name: Capture branch SHA after debug push
+        if: steps.e2e_1.outputs.failed == 'true'
+        id: sha_after_debug
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Re-wait preview after fix
+        if: steps.e2e_1.outputs.failed == 'true'
+        id: preview_after_fix
+        uses: ./.github/actions/preview-wait-vercel
+        with:
+          commit_sha: ${{ steps.sha_after_debug.outputs.sha }}
+          timeout_min: ${{ env.PREVIEW_WAIT_TIMEOUT }}
+
+      - name: Run e2e — attempt 2 (final)
+        if: steps.e2e_1.outputs.failed == 'true'
+        id: e2e_2
+        run: |
+          set -euo pipefail
+          BASE_URL="${{ steps.preview_after_fix.outputs.preview_url }}"
+          if [ -z "$BASE_URL" ]; then BASE_URL="http://localhost:3000"; fi
+          if ! PLAYWRIGHT_TEST_BASE_URL="$BASE_URL" $VERIFY_E2E_TESTS \
+              >/tmp/claude/verify-E2E.log 2>&1; then
+            gh issue comment "$ISSUE_NUMBER" --body "E2E still failing after debug attempt. Labeling \`$TRIGGER_STUCK_LABEL\`."
+            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            exit 1
+          fi
+          echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Compute final base URL for downstream steps
+        id: final_url
+        run: |
+          set -euo pipefail
+          # Fallback chain: e2e_2 base_url (if attempt 2 ran) → preview.preview_url → e2e_1 base_url → localhost
+          URL="${{ steps.e2e_2.outputs.base_url }}"
+          if [ -z "$URL" ]; then URL="${{ steps.preview.outputs.preview_url }}"; fi
+          if [ -z "$URL" ]; then URL="${{ steps.e2e_1.outputs.base_url }}"; fi
+          if [ -z "$URL" ]; then URL="http://localhost:3000"; fi
+          echo "base_url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Conditional UI screenshots
+        run: |
+          set -euo pipefail
+          if git diff --name-only "origin/${DEFAULT_BRANCH}..HEAD" \
+            | grep -E '^(src/app/|src/components/|.*\.css$)' >/dev/null; then
+            mkdir -p /tmp/claude/screenshots
+            node scripts/screenshot-routes.mjs \
+              "${{ steps.final_url.outputs.base_url }}" \
+              .claude/ui-routes.json \
+              /tmp/claude/screenshots
+            ARTIFACT_NAME="screenshots-${ISSUE_NUMBER}-$(date +%s)"
+            echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> "$GITHUB_ENV"
+          else
+            echo "No UI files changed; skipping screenshots."
+          fi
+
+      - name: Upload screenshot artifact
+        if: env.ARTIFACT_NAME != ''
+        id: upload_screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: /tmp/claude/screenshots
+
+      - name: Post screenshot comment
+        if: env.ARTIFACT_NAME != ''
+        run: |
+          set -euo pipefail
+          ARTIFACT_URL="${{ steps.upload_screenshots.outputs.artifact-url }}"
+          PREVIEW_URL="${{ steps.final_url.outputs.base_url }}"
+          # Build a comment with live preview route links + a single artifact download link.
+          # GitHub doesn't serve individual PNGs inside an artifact ZIP, so embedded
+          # `![](.../artifacts/foo.png)` would 404 — that's why we link to routes instead.
+          {
+            printf '## Visual review\n\n'
+            printf 'Preview: %s\n\n' "$PREVIEW_URL"
+            printf 'Routes captured (click to open on preview):\n\n'
+            for route in $(jq -r '.[]' .claude/ui-routes.json); do
+              printf -- '- [`%s`](%s%s)\n' "$route" "$PREVIEW_URL" "$route"
+            done
+            printf '\n📦 [Download screenshot artifact (.zip)](%s)\n' "$ARTIFACT_URL"
+          } > /tmp/claude/screenshots/pr-comment.md
+          gh pr comment "$BRANCH" --body-file /tmp/claude/screenshots/pr-comment.md
+
+      - name: Final verification gate
+        run: |
+          set -euo pipefail
+          eval "$VERIFY_TYPECHECK"
+          eval "$VERIFY_LINT"
+          eval "$VERIFY_UNIT_TESTS"
+
+      - name: Flip PR ready and post green comment
+        run: |
+          set -euo pipefail
+          gh pr ready "$BRANCH"
+          PREVIEW_URL="${{ steps.preview.outputs.preview_url }}"
+          gh pr comment "$BRANCH" --body "Verification green. Preview: ${PREVIEW_URL:-localhost}. \`@claude\` for tweaks, or apply \`$TRIGGER_CHANGES_LABEL\`."

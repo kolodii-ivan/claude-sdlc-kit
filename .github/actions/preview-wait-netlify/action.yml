@@ -1,0 +1,30 @@
+name: "Preview wait — Netlify (stub)"
+description: "Not yet implemented. Adopters using Netlify must implement this composite action's polling logic against the Netlify deploys API."
+
+inputs:
+  commit_sha:
+    description: "Git commit SHA to look up."
+    required: true
+  timeout_min:
+    description: "Maximum minutes to wait for ready state."
+    required: true
+
+outputs:
+  preview_url:
+    description: "Full preview URL or empty string."
+    value: ${{ steps.stub.outputs.preview_url }}
+  ready:
+    description: "true | false | skipped"
+    value: ${{ steps.stub.outputs.ready }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Not implemented
+      id: stub
+      shell: bash
+      run: |
+        echo "::error::preview-wait-netlify is a stub. Implement the polling logic against the Netlify deploys API and set NETLIFY_TOKEN + NETLIFY_SITE_ID secrets."
+        echo "preview_url=" >> "$GITHUB_OUTPUT"
+        echo "ready=false" >> "$GITHUB_OUTPUT"
+        exit 1

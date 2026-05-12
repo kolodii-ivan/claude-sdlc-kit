@@ -1,0 +1,25 @@
+name: "Preview wait — none"
+description: "No-op preview wait. Reports skipped so downstream steps fall back to localhost."
+
+inputs:
+  commit_sha:
+    description: "Ignored."
+    required: true
+  timeout_min:
+    description: "Ignored."
+    required: true
+
+outputs:
+  preview_url:
+    description: "Always empty."
+    value: ""
+  ready:
+    description: "Always 'skipped'."
+    value: "skipped"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Skipped
+      shell: bash
+      run: 'echo "preview-wait-none: no provider configured; ready=skipped"'

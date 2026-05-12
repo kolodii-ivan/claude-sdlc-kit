@@ -1,0 +1,283 @@
+name: Claude Brainstorm
+
+on:
+  issues:
+    types: [opened, labeled]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: claude-max
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.decide.outputs.proceed }}
+      mode: ${{ steps.decide.outputs.mode }}
+    steps:
+      - name: Decide whether to run
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          AUTHOR_ASSOCIATION: ${{ github.event.issue.author_association || github.event.comment.author_association }}
+          LABELS_JSON: ${{ toJSON(github.event.issue.labels) }}
+          IS_PR_COMMENT: ${{ github.event.issue.pull_request != null }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          SENDER_TYPE: ${{ github.event.sender.type }}
+        run: |
+          set -euo pipefail
+
+          # Skip bot-authored events (prevents recursion on the workflow's own comments)
+          if [ "$SENDER_TYPE" = "Bot" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Skip if commenter/author is not a collaborator
+          case "$AUTHOR_ASSOCIATION" in
+            OWNER|MEMBER|COLLABORATOR) ;;
+            *) echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+
+          # Skip if 'no-claude' label present on the issue
+          if echo "$LABELS_JSON" | grep -q '"no-claude"'; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Skip PR comments — those belong to a future iteration workflow
+          if [ "$IS_PR_COMMENT" = "true" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Skip 'labeled' events except for 'needs-spec' label additions
+          if [ "$EVENT_NAME" = "issues" ] && [ "$ACTION" = "labeled" ]; then
+            if [ "$LABEL_NAME" != "needs-spec" ]; then
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          # Determine mode
+          if [ "$EVENT_NAME" = "issue_comment" ]; then
+            echo "mode=continue" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=start" >> "$GITHUB_OUTPUT"
+          fi
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+  brainstorm:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    env:
+      MODE: ${{ needs.gate.outputs.mode }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      ISSUE_TITLE: ${{ github.event.issue.title }}
+      ISSUE_BODY: ${{ github.event.issue.body }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/claude-sdlc-config
+
+      - name: Compute slug, branch, today
+        id: vars
+        run: |
+          set -euo pipefail
+          SLUG=$(printf '%s' "$ISSUE_TITLE" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed 's/[^a-z0-9]\+/-/g' \
+            | sed 's/^-//; s/-$//' \
+            | cut -c1-40 \
+            | sed 's/-$//')
+          BRANCH="${BRANCH_PREFIX}/gh-${ISSUE_NUMBER}-${SLUG}"
+          TODAY=$(date -u +%Y-%m-%d)
+          echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "today=$TODAY" >> "$GITHUB_OUTPUT"
+
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.email "pothuyjohn@gmail.com"
+          git config user.name "claude-sdlc-bot"
+
+      - name: Create branch from default if starting fresh
+        if: env.MODE == 'start'
+        env:
+          BRANCH: ${{ steps.vars.outputs.branch }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Branch $BRANCH already exists on origin"
+            git fetch origin "$BRANCH":"$BRANCH"
+            git checkout "$BRANCH"
+          else
+            git checkout "$DEFAULT_BRANCH"
+            git checkout -b "$BRANCH"
+            git push -u origin "$BRANCH"
+          fi
+
+      - name: Checkout continuation branch
+        if: env.MODE == 'continue'
+        env:
+          BRANCH: ${{ steps.vars.outputs.branch }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$BRANCH":"$BRANCH"
+            git checkout "$BRANCH"
+          else
+            echo "ERROR: continue mode but branch $BRANCH does not exist on origin"
+            exit 1
+          fi
+
+      - name: Post acknowledgement on start
+        if: env.MODE == 'start'
+        env:
+          BRANCH: ${{ steps.vars.outputs.branch }}
+        run: |
+          set -euo pipefail
+          gh issue comment "$ISSUE_NUMBER" --body "Starting brainstorm on branch \`$BRANCH\`. I'll ask questions here; reply in this thread."
+
+      - name: Enforce brainstorm invocation cap
+        id: cap
+        env:
+          BRANCH: ${{ steps.vars.outputs.branch }}
+        run: |
+          set -euo pipefail
+          COUNTER_FILE=".claude/brainstorm-invocations"
+          COUNT=0
+          if [ -f "$COUNTER_FILE" ]; then
+            COUNT=$(cat "$COUNTER_FILE")
+          fi
+          COUNT=$((COUNT + 1))
+          echo "$COUNT" > "$COUNTER_FILE"
+          if [ "$COUNT" -gt "$LIMIT_BRAINSTORM_MAX" ]; then
+            gh issue comment "$ISSUE_NUMBER" --body "Brainstorm invocation cap of $LIMIT_BRAINSTORM_MAX reached. Labeling \`$TRIGGER_STUCK_LABEL\` for human attention."
+            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            echo "over_cap=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "over_cap=false" >> "$GITHUB_OUTPUT"
+          fi
+          git add "$COUNTER_FILE"
+          git commit -m "wip: Brainstorm invocation $COUNT of $LIMIT_BRAINSTORM_MAX | GH-$ISSUE_NUMBER #comment"
+          git push -u origin "$BRANCH"
+
+      - name: Snapshot current issue body for finalization
+        if: steps.cap.outputs.over_cap == 'false'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/claude
+          # Fetch the body live — on continuation runs the env value is stale.
+          gh issue view "$ISSUE_NUMBER" --json body --jq '.body' \
+            > /tmp/claude/original-body.txt
+          echo "ORIGINAL_BODY_FILE=/tmp/claude/original-body.txt" >> "$GITHUB_ENV"
+
+      - name: Read brainstorm prompt
+        id: prompt
+        if: steps.cap.outputs.over_cap == 'false'
+        run: |
+          set -euo pipefail
+          {
+            echo 'content<<CLAUDE_PROMPT_EOF'
+            cat .claude/prompts/brainstorm.md
+            echo 'CLAUDE_PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Invoke Claude for brainstorm turn
+        if: steps.cap.outputs.over_cap == 'false'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: --max-turns 40 --allowed-tools "Read,Write,Edit,Glob,Grep,Skill,TodoWrite,Bash(gh issue comment:*),Bash(gh issue view:*)"
+          plugin_marketplaces: |
+            https://github.com/anthropics/claude-plugins-official.git
+          plugins: |
+            superpowers@claude-plugins-official
+          prompt: ${{ steps.prompt.outputs.content }}
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          BRANCH_NAME: ${{ steps.vars.outputs.branch }}
+          SLUG: ${{ steps.vars.outputs.slug }}
+          TODAY: ${{ steps.vars.outputs.today }}
+          ORIGINAL_BODY_FILE: /tmp/claude/original-body.txt
+
+      - name: Finalize convergence
+        if: steps.cap.outputs.over_cap == 'false'
+        env:
+          BRANCH: ${{ steps.vars.outputs.branch }}
+          SLUG: ${{ steps.vars.outputs.slug }}
+          TODAY: ${{ steps.vars.outputs.today }}
+        run: |
+          set -euo pipefail
+
+          SPEC_SRC=/tmp/claude/spec.md
+          BODY_SRC=/tmp/claude/new-body.md
+
+          if [ ! -f "$SPEC_SRC" ] && [ ! -f "$BODY_SRC" ]; then
+            echo "No convergence files written by Claude — assuming a clarifying question was posted. Done."
+            exit 0
+          fi
+
+          if [ ! -f "$SPEC_SRC" ] || [ ! -f "$BODY_SRC" ]; then
+            echo "ERROR: Only one of spec.md / new-body.md exists in /tmp/claude/."
+            ls -la /tmp/claude/ || true
+            gh issue comment "$ISSUE_NUMBER" --body "Convergence finalization failed: only one of \`spec.md\` or \`new-body.md\` was produced. Labeling \`$TRIGGER_STUCK_LABEL\`."
+            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            exit 1
+          fi
+
+          SPEC_DST="docs/superpowers/specs/${TODAY}-gh${ISSUE_NUMBER}-${SLUG}-design.md"
+          # When issues are filed with `needs-spec` at creation time, BOTH the
+          # `issues: opened` and `issues: labeled` events fire two brainstorm runs.
+          # The claude-max concurrency group serializes them, but the second run
+          # will hit this finalize step after the first already committed and
+          # dispatched. Bail cleanly if that's the case — re-dispatching would
+          # cause duplicate implement runs.
+          if git ls-files --error-unmatch "$SPEC_DST" >/dev/null 2>&1; then
+            echo "Spec already committed by a prior brainstorm run on this branch; finalize is idempotent — exiting."
+            exit 0
+          fi
+          mkdir -p "$(dirname "$SPEC_DST")"
+          cp "$SPEC_SRC" "$SPEC_DST"
+
+          git add "$SPEC_DST"
+          git commit -m "docs: Added design spec for issue GH-${ISSUE_NUMBER} | GH-${ISSUE_NUMBER} #time 15m"
+          # Claude Code action scrubs the runner's git auth. Re-bind via extraheader
+          # (the same mechanism actions/checkout uses) so push picks up GH_TOKEN.
+          AUTH_HEADER=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64)
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic $AUTH_HEADER"
+          git push -u origin "$BRANCH"
+
+          {
+            echo "### Original issue body"
+            echo
+            cat "$ORIGINAL_BODY_FILE"
+          } | gh issue comment "$ISSUE_NUMBER" --body-file -
+
+          gh issue edit "$ISSUE_NUMBER" --body-file "$BODY_SRC"
+
+          gh issue comment "$ISSUE_NUMBER" --body "Spec ready. Auto-advancing to implementation."
+
+          gh api "repos/${GITHUB_REPOSITORY}/dispatches" \
+            -f event_type=spec-ready \
+            -F "client_payload[issue]=${ISSUE_NUMBER}" \
+            -F "client_payload[branch]=${BRANCH}" \
+            -F "client_payload[slug]=${SLUG}"
+
+          echo "Convergence finalized successfully"

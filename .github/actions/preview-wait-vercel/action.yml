@@ -1,0 +1,29 @@
+name: "Preview wait — Vercel"
+description: "Polls Vercel deployments API until the deployment for a given commit SHA reports state=READY."
+
+inputs:
+  commit_sha:
+    description: "Git commit SHA to look up in Vercel deployments."
+    required: true
+  timeout_min:
+    description: "Maximum minutes to wait for READY state."
+    required: true
+
+outputs:
+  preview_url:
+    description: "Full preview URL or empty string."
+    value: ${{ steps.poll.outputs.preview_url }}
+  ready:
+    description: "true | false | skipped"
+    value: ${{ steps.poll.outputs.ready }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Poll Vercel
+      id: poll
+      shell: bash
+      env:
+        COMMIT_SHA: ${{ inputs.commit_sha }}
+        TIMEOUT_MIN: ${{ inputs.timeout_min }}
+      run: ${{ github.action_path }}/scripts/wait.sh
