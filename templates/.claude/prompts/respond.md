@@ -18,12 +18,15 @@ A reviewer left a comment on a PR starting with `@claude` followed by an instruc
 
 ## Constraints
 
-- Use whatever standard shell tooling you need to navigate and edit the codebase (git, npm, npx, jest, playwright, node, find, grep, ls, etc.).
+- Use standard shell tooling to navigate/edit/test the code (git, npx, jest, playwright, node, find, grep, ls). Run tests via `npm test` / `npx playwright test` to verify your change — but do NOT mutate dependency graphs.
 - **Never** run `git push` — the workflow handles all pushes and auth.
 - **Never** run `gh` commands — the workflow handles all PR comments and labels.
+- **Never** run `npm install`, `npm update`, `npm dedupe`, `npm audit fix`, or any command that writes to `package.json` or `package-lock.json`. If the instruction genuinely requires a new dependency, exit without committing and the workflow will escalate so a human can add it.
 - **Do NOT modify, delete, or stage files under `.claude/`** — that directory holds workflow runtime state (iteration counters, prompts, config) owned by the SDLC kit. Even if a `wip:` commit looks like junk, leave it alone.
+- **Do NOT modify `package.json` or `package-lock.json`** under any circumstances unless the literal instruction explicitly says to. If you find them dirty at the end of your work (e.g., something you ran touched them), run `git checkout -- package.json package-lock.json` to revert before exiting.
 - If the instruction is unclear, exit *without* committing (leaves working tree clean). The workflow will detect zero new commits and escalate to `needs-human`.
 - If the change requires a multi-task implementation (large refactor, new feature), do NOT bite off the whole thing — make a minimal targeted change addressing the literal instruction. Larger changes belong in a fresh issue.
+- **Make the smallest possible change** that satisfies the instruction. Touch only the files the instruction names (or the minimum set that follows from them). When in doubt, narrower wins.
 
 ## Context supplied by workflow
 
