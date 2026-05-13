@@ -1,0 +1,24 @@
+{
+  "name": "claude-sdlc-kit",
+  "description": "Brainstorm → spec → plan → TDD → ready-for-review PR pipeline for GitHub repos, driven by Claude.",
+  "owner": {
+    "name": "Ivan Kolodii",
+    "email": "pothuyjohn@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "claude-sdlc-kit",
+      "description": "Slash-command frontend (/sdlc-install, /sdlc-update, /sdlc-doctor, /sdlc-version) for the SDLC kit npm CLI.",
+      "version": "1.0.4",
+      "source": "./",
+      "author": {
+        "name": "Ivan Kolodii",
+        "email": "pothuyjohn@gmail.com"
+      },
+      "homepage": "https://github.com/kolodii-ivan/claude-sdlc-kit",
+      "repository": "https://github.com/kolodii-ivan/claude-sdlc-kit",
+      "license": "MIT",
+      "keywords": ["claude", "sdlc", "github-actions", "automation", "tdd"]
+    }
+  ]
+}
