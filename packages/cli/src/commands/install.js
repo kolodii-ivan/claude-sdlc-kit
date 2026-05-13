@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, appendFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { CONFIG_FIELDS, resolveConfig, promptInteractive } from "../lib/prompts.js";
 import { KIT_MANAGED_PATHS, sha256OfString } from "../lib/files.js";
@@ -90,7 +91,8 @@ export async function run(argv) {
   //    beyond what's already in config.yml.
 
   // 4) Write manifest
-  const pkgJsonPath = join(templatesDir, "../packages/cli/package.json");
+  const here = dirname(fileURLToPath(import.meta.url));
+  const pkgJsonPath = join(here, "../../package.json");
   const version = existsSync(pkgJsonPath)
     ? (JSON.parse(readFileSync(pkgJsonPath, "utf8")).version || "0.0.0")
     : "0.0.0";

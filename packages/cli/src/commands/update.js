@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { KIT_MANAGED_PATHS, sha256OfFile, sha256OfString } from "../lib/files.js";
 import { readManifest, writeManifest } from "../lib/manifest.js";
@@ -38,7 +39,8 @@ export async function run(argv) {
 
   const templatesDir = findTemplatesDir();
   const newPin = flags.pin || manifest.pin || "v1";
-  const pkgJsonPath = join(templatesDir, "../packages/cli/package.json");
+  const here = dirname(fileURLToPath(import.meta.url));
+  const pkgJsonPath = join(here, "../../package.json");
   const newVersion = existsSync(pkgJsonPath)
     ? (JSON.parse(readFileSync(pkgJsonPath, "utf8")).version || "0.0.0")
     : "0.0.0";
