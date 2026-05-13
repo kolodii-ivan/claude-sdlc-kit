@@ -110,7 +110,7 @@ export async function run(argv) {
   const gi = join(root, ".gitignore");
   if (existsSync(gi)) {
     const cur = readFileSync(gi, "utf8");
-    for (const line of ["/test-results", "/playwright-report"]) {
+    for (const line of ["/test-results", "/playwright-report", "/.kit"]) {
       if (!cur.split("\n").includes(line)) {
         appendFileSync(gi, `\n${line}\n`);
         log.ok(`Appended ${line} to .gitignore`);
