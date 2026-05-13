@@ -1,0 +1,33 @@
+{
+  "name": "@kolodii-ivan/claude-sdlc-kit",
+  "version": "0.0.0",
+  "description": "Install, update, and diagnose the Claude SDLC kit in any GitHub repo",
+  "license": "MIT",
+  "author": "Ivan Kolodii",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kolodii-ivan/claude-sdlc-kit.git",
+    "directory": "packages/cli"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "bin": {
+    "claude-sdlc-kit": "./bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "templates/"
+  ],
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "keywords": [
+    "claude",
+    "sdlc",
+    "github-actions",
+    "automation"
+  ]
+}
