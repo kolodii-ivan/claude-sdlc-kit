@@ -200,8 +200,8 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "docs: Auto-staged auxiliary plan/spec from Claude session | GH-${ISSUE_NUMBER} #time 1m"
           fi
-          # Revert any unintended changes to dep manifests (prompt rule violation guard)
-          git checkout -- package.json package-lock.json 2>/dev/null || true
+          # Revert any unintended changes to kit-owned files (prompt rule violation guard)
+          git checkout -- package.json package-lock.json .claude/prompts/ .claude/ui-routes.json 2>/dev/null || true
           DIRTY=$(git status --porcelain | grep -vE '^[ MAD?]{2} \.(kit|claude-pr)/|^[ MAD?]{2} \.claude/(\.kit-manifest\.json|iterate-iterations|implement-iterations|brainstorm-invocations)$' || true)
           if [ -n "$DIRTY" ]; then
             DIFF_STAT=$(git diff --stat HEAD 2>/dev/null || echo "(no diff)")
@@ -278,8 +278,8 @@ jobs:
         if: steps.verify_1.outputs.failed == 'true'
         run: |
           set -euo pipefail
-          # Revert any unintended changes to dep manifests (prompt rule violation guard)
-          git checkout -- package.json package-lock.json 2>/dev/null || true
+          # Revert any unintended changes to kit-owned files (prompt rule violation guard)
+          git checkout -- package.json package-lock.json .claude/prompts/ .claude/ui-routes.json 2>/dev/null || true
           DIRTY=$(git status --porcelain | grep -vE '^[ MAD?]{2} \.(kit|claude-pr)/|^[ MAD?]{2} \.claude/(\.kit-manifest\.json|iterate-iterations|implement-iterations|brainstorm-invocations)$' || true)
           if [ -n "$DIRTY" ]; then
             DIFF_STAT=$(git diff --stat HEAD 2>/dev/null || echo "(no diff)")
@@ -450,8 +450,8 @@ jobs:
         if: steps.e2e_1.outputs.failed == 'true'
         run: |
           set -euo pipefail
-          # Revert any unintended changes to dep manifests (prompt rule violation guard)
-          git checkout -- package.json package-lock.json 2>/dev/null || true
+          # Revert any unintended changes to kit-owned files (prompt rule violation guard)
+          git checkout -- package.json package-lock.json .claude/prompts/ .claude/ui-routes.json 2>/dev/null || true
           DIRTY=$(git status --porcelain | grep -vE '^[ MAD?]{2} \.(kit|claude-pr)/|^[ MAD?]{2} \.claude/(\.kit-manifest\.json|iterate-iterations|implement-iterations|brainstorm-invocations)$' || true)
           if [ -n "$DIRTY" ]; then
             DIFF_STAT=$(git diff --stat HEAD 2>/dev/null || echo "(no diff)")
