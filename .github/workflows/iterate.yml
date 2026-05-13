@@ -131,6 +131,15 @@ jobs:
           fetch-depth: 0
           ref: ${{ needs.gate.outputs.branch }}
 
+      - name: Fetch kit helper scripts
+        uses: actions/checkout@v4
+        with:
+          repository: kolodii-ivan/claude-sdlc-kit
+          ref: v1
+          path: .kit
+          sparse-checkout: .github/actions/claude-sdlc-config/scripts
+          sparse-checkout-cone-mode: false
+
       - uses: kolodii-ivan/claude-sdlc-kit/.github/actions/claude-sdlc-config@v1
 
       - name: Configure git identity
@@ -168,7 +177,7 @@ jobs:
           fi
           git add "$COUNTER_FILE"
           git commit -m "wip: Iterate run $COUNT of $LIMIT_MAX_ITERATIONS | GH-$ISSUE_NUMBER #comment"
-          source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
+          source .kit/.github/actions/claude-sdlc-config/scripts/rebind-auth.sh
           rebind_git_auth
           git push -u origin "$BRANCH"
 
@@ -297,7 +306,7 @@ jobs:
             gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
             exit 1
           fi
-          source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
+          source .kit/.github/actions/claude-sdlc-config/scripts/rebind-auth.sh
           rebind_git_auth
           git push -u origin "$BRANCH"
 
@@ -373,7 +382,7 @@ jobs:
             gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
             exit 1
           fi
-          source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
+          source .kit/.github/actions/claude-sdlc-config/scripts/rebind-auth.sh
           rebind_git_auth
           git push -u origin "$BRANCH"
 
@@ -514,7 +523,7 @@ jobs:
             gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
             exit 1
           fi
-          source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
+          source .kit/.github/actions/claude-sdlc-config/scripts/rebind-auth.sh
           rebind_git_auth
           git push -u origin "$BRANCH"
 
