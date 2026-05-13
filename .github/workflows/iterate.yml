@@ -1,26 +1,109 @@
-name: Claude Implement
+name: Claude SDLC — Iterate
 
 on:
-  repository_dispatch:
-    types: [spec-ready]
-  workflow_dispatch:
-    inputs:
-      issue:
-        description: "Issue number"
-        required: true
-      branch:
-        description: "Feature branch (origin/<branch>)"
-        required: true
-      slug:
-        description: "Slug (lowercase, hyphenated, <=40 chars)"
-        required: true
+  workflow_call:
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: { required: true }
+      VERCEL_TOKEN:             { required: false }
+      VERCEL_PROJECT_ID:        { required: false }
+      VERCEL_AUTOMATION_BYPASS_SECRET: { required: false }
+      NEXT_PUBLIC_SUPABASE_URL: { required: false }
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: { required: false }
+      SUPABASE_SERVICE_ROLE_KEY: { required: false }
 
 concurrency:
   group: claude-max
   cancel-in-progress: false
 
 jobs:
-  implement:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      issues: read
+    outputs:
+      proceed: ${{ steps.decide.outputs.proceed }}
+      mode: ${{ steps.decide.outputs.mode }}
+      pr_number: ${{ steps.decide.outputs.pr_number }}
+      branch: ${{ steps.decide.outputs.branch }}
+      issue_number: ${{ steps.decide.outputs.issue_number }}
+    steps:
+      - name: Decide whether to run
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IS_PR_COMMENT: ${{ github.event.issue.pull_request != null }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association || github.event.sender.login }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          SENDER_TYPE: ${{ github.event.sender.type }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          ISSUE_LABELS_JSON: ${{ toJSON(github.event.issue.labels) }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels) }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Skip bot-authored events (prevents recursion)
+          if [ "$SENDER_TYPE" = "Bot" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # Skip if no-claude label is anywhere in scope
+          if echo "$ISSUE_LABELS_JSON $PR_LABELS_JSON" | grep -q '"no-claude"'; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          if [ "$EVENT_NAME" = "issue_comment" ]; then
+            # Must be a comment on a PR (not a regular issue)
+            if [ "$IS_PR_COMMENT" != "true" ]; then
+              echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            # Must start with @claude (after trimming leading whitespace)
+            TRIMMED=$(printf '%s' "$COMMENT_BODY" | sed -E 's/^[[:space:]]+//')
+            case "$TRIMMED" in
+              "@claude "*|"@claude") ;;
+              *) echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            esac
+            # Author-association check (collaborator+)
+            case "$AUTHOR_ASSOCIATION" in
+              OWNER|MEMBER|COLLABORATOR) ;;
+              *) echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            esac
+            PR_NUMBER="${{ github.event.issue.number }}"
+            ISSUE_NUMBER="$PR_NUMBER"
+            MODE="respond"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            # Must be the changes label
+            if [ "$LABEL_NAME" != "needs-changes" ]; then
+              echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            case "$PR_AUTHOR_ASSOCIATION" in
+              OWNER|MEMBER|COLLABORATOR) ;;
+              *) echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            esac
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            ISSUE_NUMBER="$PR_NUMBER"
+            MODE="address-feedback"
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # Resolve PR head ref via gh — works for both event types
+          BRANCH=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefName --jq '.headRefName')
+          if [ -z "$BRANCH" ] || [ "$BRANCH" = "null" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+
+  iterate:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -28,22 +111,25 @@ jobs:
       issues: write
       pull-requests: write
       id-token: write
+      actions: write   # required for gh run cancel in the early-exit path
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      ISSUE_NUMBER: ${{ github.event.client_payload.issue || github.event.inputs.issue }}
-      BRANCH: ${{ github.event.client_payload.branch || github.event.inputs.branch }}
-      SLUG: ${{ github.event.client_payload.slug || github.event.inputs.slug }}
+      MODE: ${{ needs.gate.outputs.mode }}
+      PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+      BRANCH: ${{ needs.gate.outputs.branch }}
+      ISSUE_NUMBER: ${{ needs.gate.outputs.issue_number }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      COMMENT_BODY: ${{ github.event.comment.body }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.client_payload.branch || github.event.inputs.branch }}
+          ref: ${{ needs.gate.outputs.branch }}
 
       - uses: ./.github/actions/claude-sdlc-config
 
@@ -53,20 +139,13 @@ jobs:
           git config user.email "pothuyjohn@gmail.com"
           git config user.name "claude-sdlc-bot"
 
-      - name: Compute today + spec/plan paths
-        id: paths
+      - name: Resolve spec path (best-effort)
+        id: spec
         run: |
           set -euo pipefail
-          TODAY=$(date -u +%Y-%m-%d)
-          SPEC=$(ls docs/superpowers/specs/*-gh${ISSUE_NUMBER}-${SLUG}-design.md 2>/dev/null | head -n1 || true)
-          if [ -z "$SPEC" ]; then
-            echo "::error::No spec found matching docs/superpowers/specs/*-gh${ISSUE_NUMBER}-${SLUG}-design.md"
-            exit 1
-          fi
-          PLAN="docs/superpowers/plans/${TODAY}-gh${ISSUE_NUMBER}-${SLUG}-plan.md"
-          echo "today=$TODAY" >> "$GITHUB_OUTPUT"
-          echo "spec=$SPEC" >> "$GITHUB_OUTPUT"
-          echo "plan=$PLAN" >> "$GITHUB_OUTPUT"
+          # Try to find a spec referencing GH-<issue>; safe to be empty
+          SPEC=$(ls docs/superpowers/specs/*-gh${ISSUE_NUMBER}-*-design.md 2>/dev/null | head -n1 || true)
+          echo "path=$SPEC" >> "$GITHUB_OUTPUT"
 
       - name: Install Playwright chromium
         run: npx playwright install --with-deps chromium
@@ -75,7 +154,7 @@ jobs:
         id: cap
         run: |
           set -euo pipefail
-          COUNTER_FILE=".claude/implement-iterations"
+          COUNTER_FILE=".claude/iterate-iterations"
           COUNT=0
           if [ -f "$COUNTER_FILE" ]; then
             COUNT=$(cat "$COUNTER_FILE")
@@ -83,114 +162,125 @@ jobs:
           COUNT=$((COUNT + 1))
           echo "$COUNT" > "$COUNTER_FILE"
           if [ "$COUNT" -gt "$LIMIT_MAX_ITERATIONS" ]; then
-            gh issue comment "$ISSUE_NUMBER" --body "Implementation iteration cap of $LIMIT_MAX_ITERATIONS reached. Labeling \`$TRIGGER_STUCK_LABEL\` for human attention."
-            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            gh pr comment "$PR_NUMBER" --body "Iterate cap of $LIMIT_MAX_ITERATIONS reached on this branch. Labeling \`$TRIGGER_STUCK_LABEL\` for human attention."
+            gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
             exit 1
           fi
           git add "$COUNTER_FILE"
-          git commit -m "wip: Implement iteration $COUNT of $LIMIT_MAX_ITERATIONS | GH-$ISSUE_NUMBER #comment"
+          git commit -m "wip: Iterate run $COUNT of $LIMIT_MAX_ITERATIONS | GH-$ISSUE_NUMBER #comment"
           source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
           rebind_git_auth
           git push -u origin "$BRANCH"
 
-      - name: Read plan prompt
-        id: plan_prompt
+      - name: Build Mode A context (instruction)
+        if: env.MODE == 'respond'
         run: |
           set -euo pipefail
-          {
-            echo 'content<<CLAUDE_PROMPT_EOF'
-            cat .claude/prompts/plan.md
-            echo 'CLAUDE_PROMPT_EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Claude #1 — write plan
-        id: claude_plan
-        continue-on-error: true
-        uses: anthropics/claude-code-action@v1
-        with:
-          allowed_bots: "*"
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: --max-turns 30 --allowed-tools "Read,Write,Edit,Glob,Grep,Skill,TodoWrite,Bash"
-          plugin_marketplaces: |
-            https://github.com/anthropics/claude-plugins-official.git
-          plugins: |
-            superpowers@claude-plugins-official
-          prompt: ${{ steps.plan_prompt.outputs.content }}
-        env:
-          SPEC_PATH: ${{ steps.paths.outputs.spec }}
-          BRANCH_NAME: ${{ env.BRANCH }}
-          SLUG: ${{ env.SLUG }}
-          TODAY: ${{ steps.paths.outputs.today }}
-
-      - name: Escalate if Claude #1 errored
-        if: steps.claude_plan.outcome == 'failure'
-        run: |
-          set -euo pipefail
-          gh issue comment "$ISSUE_NUMBER" --body "Plan-phase Claude action exited with error (likely max-turns or context limit). Labeling \`$TRIGGER_STUCK_LABEL\`."
-          gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
-          exit 1
-
-      - name: Commit plan
-        run: |
-          set -euo pipefail
-          if [ ! -s /tmp/claude/plan.md ]; then
-            gh issue comment "$ISSUE_NUMBER" --body "Plan phase produced no plan. Labeling \`$TRIGGER_STUCK_LABEL\`."
-            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+          mkdir -p /tmp/claude
+          INSTRUCTION=$(printf '%s' "$COMMENT_BODY" | sed -E 's/^[[:space:]]*@claude[[:space:]]*//')
+          printf '%s' "$INSTRUCTION" > /tmp/claude/instruction.md
+          if [ ! -s /tmp/claude/instruction.md ]; then
+            gh pr comment "$PR_NUMBER" --body "Empty \`@claude\` instruction. Nothing to do."
             exit 1
           fi
-          PLAN_DST="${{ steps.paths.outputs.plan }}"
-          mkdir -p "$(dirname "$PLAN_DST")"
-          cp /tmp/claude/plan.md "$PLAN_DST"
-          git add "$PLAN_DST"
-          git commit -m "docs: Added implementation plan for issue GH-${ISSUE_NUMBER} | GH-${ISSUE_NUMBER} #time 20m"
-          source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
-          rebind_git_auth
-          git push -u origin "$BRANCH"
 
-      - name: Read implement prompt
-        id: implement_prompt
+      - name: Build Mode B context (review threads)
+        if: env.MODE == 'address-feedback'
         run: |
           set -euo pipefail
+          mkdir -p /tmp/claude
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY##*/}"
+          gh api graphql -F owner="$OWNER" -F repo="$REPO" -F pr="$PR_NUMBER" -f query='
+            query($owner:String!, $repo:String!, $pr:Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $pr) {
+                  reviewThreads(first: 50) {
+                    nodes {
+                      id
+                      isResolved
+                      path
+                      line
+                      comments(first: 20) {
+                        nodes { body, author { login } }
+                      }
+                    }
+                  }
+                }
+              }
+            }' \
+            | jq '.data.repository.pullRequest.reviewThreads.nodes
+                  | map(select(.isResolved == false))' \
+            > /tmp/claude/review-threads.json
+          THREAD_COUNT=$(jq 'length' /tmp/claude/review-threads.json)
+          if [ "$THREAD_COUNT" = "0" ]; then
+            gh pr edit "$PR_NUMBER" --remove-label "$TRIGGER_CHANGES_LABEL"
+            gh pr comment "$PR_NUMBER" --body "No unresolved review threads found. Removed \`$TRIGGER_CHANGES_LABEL\` label."
+            echo "NOTHING_TO_DO=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Exit early if nothing to do
+        if: env.NOTHING_TO_DO == 'true'
+        run: |
+          set -euo pipefail
+          # `exit 0` only exits the step's shell, not the job. Use gh run cancel
+          # to actually stop downstream steps (Claude action, verify, e2e, etc).
+          gh run cancel "$GITHUB_RUN_ID"
+          # Sleep so the cancel signal propagates before the runner moves on.
+          sleep 60
+          exit 0
+
+      - name: Read iterate prompt
+        id: iterate_prompt
+        run: |
+          set -euo pipefail
+          PROMPT_FILE=".claude/prompts/respond.md"
+          if [ "$MODE" = "address-feedback" ]; then
+            PROMPT_FILE=".claude/prompts/address-feedback.md"
+          fi
           {
             echo 'content<<CLAUDE_PROMPT_EOF'
-            cat .claude/prompts/implement.md
+            cat "$PROMPT_FILE"
             echo 'CLAUDE_PROMPT_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Claude #2 — execute plan
-        id: claude_implement
+      - name: Claude — iterate
+        id: claude_iterate
         continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           allowed_bots: "*"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: --max-turns 200 --allowed-tools "Read,Write,Edit,Glob,Grep,Skill,TodoWrite,Agent,Bash"
+          claude_args: --max-turns 100 --allowed-tools "Read,Write,Edit,Glob,Grep,Skill,TodoWrite,Agent,Bash"
           plugin_marketplaces: |
             https://github.com/anthropics/claude-plugins-official.git
           plugins: |
             superpowers@claude-plugins-official
-          prompt: ${{ steps.implement_prompt.outputs.content }}
+          prompt: ${{ steps.iterate_prompt.outputs.content }}
         env:
-          PLAN_PATH: ${{ steps.paths.outputs.plan }}
+          INSTRUCTION_PATH: /tmp/claude/instruction.md
+          REVIEW_THREADS_PATH: /tmp/claude/review-threads.json
+          SPEC_PATH: ${{ steps.spec.outputs.path }}
           BRANCH_NAME: ${{ env.BRANCH }}
-          SLUG: ${{ env.SLUG }}
-          TODAY: ${{ steps.paths.outputs.today }}
+          PR_NUMBER: ${{ env.PR_NUMBER }}
 
-      - name: Escalate if Claude #2 errored
-        if: steps.claude_implement.outcome == 'failure'
+      - name: Escalate if Claude iterate errored
+        if: steps.claude_iterate.outcome == 'failure'
         run: |
           set -euo pipefail
-          gh issue comment "$ISSUE_NUMBER" --body "Implement-phase Claude action exited with error (likely max-turns or context limit). Labeling \`$TRIGGER_STUCK_LABEL\`."
-          gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+          BODY="Iterate-phase Claude action exited with error (likely max-turns). Labeling \`$TRIGGER_STUCK_LABEL\`."
+          if [ -f /tmp/claude/hypothesis.md ]; then
+            HYPO=$(cat /tmp/claude/hypothesis.md)
+            BODY="$BODY"$'\n\n''Hypothesis from agent:'$'\n\n'"$HYPO"
+          fi
+          gh pr comment "$PR_NUMBER" --body "$BODY"
+          gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
           exit 1
 
-      - name: Push implementation commits
+      - name: Push iterate commits
         run: |
           set -euo pipefail
-          # Auto-stage any plan/spec docs Claude wrote but forgot to commit
-          # (the writing-plans skill creates its own plan file at a slightly
-          # different path than the workflow's canonical plan, and it often
-          # lands as untracked).
+          # Auto-stage any plan/spec docs Claude wrote but forgot to commit.
           git add -A docs/superpowers/plans/ docs/superpowers/specs/ 2>/dev/null || true
           if ! git diff --cached --quiet; then
             git commit -m "docs: Auto-staged auxiliary plan/spec from Claude session | GH-${ISSUE_NUMBER} #time 1m"
@@ -198,8 +288,13 @@ jobs:
           DIRTY=$(git status --porcelain)
           if [ -n "$DIRTY" ]; then
             DIFF_STAT=$(git diff --stat HEAD 2>/dev/null || echo "(no diff)")
-            gh issue comment "$ISSUE_NUMBER" --body "$(printf 'Implementation phase exited with uncommitted changes:\n\n```\n%s\n```\n\n```\n%s\n```\n\nLabeling `%s`.' "$DIRTY" "$DIFF_STAT" "$TRIGGER_STUCK_LABEL")"
-            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            echo "::group::Dirty tree contents"
+            printf '%s\n' "$DIRTY"
+            echo "----- diff stat -----"
+            printf '%s\n' "$DIFF_STAT"
+            echo "::endgroup::"
+            gh pr comment "$PR_NUMBER" --body "$(printf 'Iterate phase exited with uncommitted changes:\n\n```\n%s\n```\n\n```\n%s\n```\n\nLabeling `%s`.' "$DIRTY" "$DIFF_STAT" "$TRIGGER_STUCK_LABEL")"
+            gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
             exit 1
           fi
           source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
@@ -236,7 +331,7 @@ jobs:
             echo 'CLAUDE_PROMPT_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Claude #3 — debug local verification
+      - name: Claude — debug local verification
         if: steps.verify_1.outputs.failed == 'true'
         id: claude_debug_local
         continue-on-error: true
@@ -254,7 +349,7 @@ jobs:
           FAILURE_LOG_PATH: ${{ env.FAILED_LOG }}
           BRANCH_NAME: ${{ env.BRANCH }}
 
-      - name: Escalate if Claude #3 (local) errored
+      - name: Escalate if Claude debug (local) errored
         if: steps.claude_debug_local.outcome == 'failure'
         run: |
           set -euo pipefail
@@ -263,8 +358,8 @@ jobs:
             HYPO=$(cat /tmp/claude/hypothesis.md)
             BODY="$BODY"$'\n\n''Hypothesis from agent:'$'\n\n'"$HYPO"
           fi
-          gh issue comment "$ISSUE_NUMBER" --body "$BODY"
-          gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+          gh pr comment "$PR_NUMBER" --body "$BODY"
+          gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
           exit 1
 
       - name: Push debug commits (local)
@@ -274,8 +369,8 @@ jobs:
           DIRTY=$(git status --porcelain)
           if [ -n "$DIRTY" ]; then
             DIFF_STAT=$(git diff --stat HEAD 2>/dev/null || echo "(no diff)")
-            gh issue comment "$ISSUE_NUMBER" --body "$(printf 'Debug agent exited with uncommitted changes:\n\n```\n%s\n```\n\n```\n%s\n```\n\nLabeling `%s`.' "$DIRTY" "$DIFF_STAT" "$TRIGGER_STUCK_LABEL")"
-            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            gh pr comment "$PR_NUMBER" --body "$(printf 'Debug agent exited with uncommitted changes:\n\n```\n%s\n```\n\n```\n%s\n```\n\nLabeling `%s`.' "$DIRTY" "$DIFF_STAT" "$TRIGGER_STUCK_LABEL")"
+            gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
             exit 1
           fi
           source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
@@ -296,40 +391,11 @@ jobs:
               tail -50 "$LOG"
               echo "----- end of log -----"
               FAIL_TAIL=$(tail -50 "$LOG")
-              gh issue comment "$ISSUE_NUMBER" --body "$(printf 'Local verification still failing after debug attempt: **%s**\n\n```\n%s\n```\n\nLabeling `%s`.' "$CMD_NAME" "$FAIL_TAIL" "$TRIGGER_STUCK_LABEL")"
-              gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+              gh pr comment "$PR_NUMBER" --body "$(printf 'Local verification still failing after debug attempt: **%s**\n\n```\n%s\n```\n\nLabeling `%s`.' "$CMD_NAME" "$FAIL_TAIL" "$TRIGGER_STUCK_LABEL")"
+              gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
               exit 1
             fi
           done
-
-      - name: Open or refresh draft PR
-        id: pr
-        run: |
-          set -euo pipefail
-          ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --json title --jq '.title')
-          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
-            echo "PR already exists for $BRANCH"
-          else
-            SPEC_SUMMARY=$(awk 'BEGIN{n=0} /^## /{n++} n<=2 && !/^## /' "${{ steps.paths.outputs.spec }}" | head -c 2000)
-            VERIFY_TAIL=$(tail -n 10 /tmp/claude/verify-TYPECHECK.log 2>/dev/null || echo "n/a")
-            {
-              printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n%s\n%s\n\n%s\n' \
-                "## Summary" \
-                "$SPEC_SUMMARY" \
-                "## Plan" \
-                "See \`${{ steps.paths.outputs.plan }}\`." \
-                "## Verification" \
-                '```' \
-                "$VERIFY_TAIL" \
-                '```' \
-                "Closes #${ISSUE_NUMBER}"
-            } > /tmp/claude/pr-body.md
-            gh pr create --draft \
-              --base "$DEFAULT_BRANCH" \
-              --head "$BRANCH" \
-              --title "feature: ${ISSUE_TITLE} | GH-${ISSUE_NUMBER}" \
-              --body-file /tmp/claude/pr-body.md
-          fi
 
       - name: Capture branch SHA before preview
         id: sha_pre_preview
@@ -354,15 +420,15 @@ jobs:
             echo "mode=preview" >> "$GITHUB_OUTPUT"
             echo "base_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
           elif [ "$READY" = "skipped" ] && [ "$VERIFY_E2E_NEEDS_PREVIEW" = "true" ]; then
-            gh issue comment "$ISSUE_NUMBER" --body "Preview provider is none but config requires preview for e2e. Labeling \`$TRIGGER_STUCK_LABEL\`."
-            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            gh pr comment "$PR_NUMBER" --body "Preview provider is none but config requires preview for e2e. Labeling \`$TRIGGER_STUCK_LABEL\`."
+            gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
             exit 1
           elif [ "$READY" = "skipped" ]; then
             echo "mode=localhost" >> "$GITHUB_OUTPUT"
             echo "base_url=http://localhost:3000" >> "$GITHUB_OUTPUT"
           else
-            gh issue comment "$ISSUE_NUMBER" --body "Preview wait failed (ready=$READY). Labeling \`$TRIGGER_STUCK_LABEL\`."
-            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            gh pr comment "$PR_NUMBER" --body "Preview wait failed (ready=$READY). Labeling \`$TRIGGER_STUCK_LABEL\`."
+            gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
             exit 1
           fi
 
@@ -406,7 +472,7 @@ jobs:
             echo 'CLAUDE_PROMPT_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Claude #3 — debug e2e
+      - name: Claude — debug e2e
         if: steps.e2e_1.outputs.failed == 'true'
         id: claude_debug_e2e
         continue-on-error: true
@@ -424,7 +490,7 @@ jobs:
           FAILURE_LOG_PATH: ${{ env.FAILED_LOG }}
           BRANCH_NAME: ${{ env.BRANCH }}
 
-      - name: Escalate if Claude #3 (e2e) errored
+      - name: Escalate if Claude debug (e2e) errored
         if: steps.claude_debug_e2e.outcome == 'failure'
         run: |
           set -euo pipefail
@@ -433,8 +499,8 @@ jobs:
             HYPO=$(cat /tmp/claude/hypothesis.md)
             BODY="$BODY"$'\n\n''Hypothesis from agent:'$'\n\n'"$HYPO"
           fi
-          gh issue comment "$ISSUE_NUMBER" --body "$BODY"
-          gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+          gh pr comment "$PR_NUMBER" --body "$BODY"
+          gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
           exit 1
 
       - name: Push e2e debug commits
@@ -444,8 +510,8 @@ jobs:
           DIRTY=$(git status --porcelain)
           if [ -n "$DIRTY" ]; then
             DIFF_STAT=$(git diff --stat HEAD 2>/dev/null || echo "(no diff)")
-            gh issue comment "$ISSUE_NUMBER" --body "$(printf 'Debug agent (e2e) exited with uncommitted changes:\n\n```\n%s\n```\n\n```\n%s\n```\n\nLabeling `%s`.' "$DIRTY" "$DIFF_STAT" "$TRIGGER_STUCK_LABEL")"
-            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            gh pr comment "$PR_NUMBER" --body "$(printf 'Debug agent (e2e) exited with uncommitted changes:\n\n```\n%s\n```\n\n```\n%s\n```\n\nLabeling `%s`.' "$DIRTY" "$DIFF_STAT" "$TRIGGER_STUCK_LABEL")"
+            gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
             exit 1
           fi
           source .github/actions/claude-sdlc-config/scripts/rebind-auth.sh
@@ -476,8 +542,8 @@ jobs:
           if [ -z "$BASE_URL" ]; then BASE_URL="http://localhost:3000"; fi
           if ! PLAYWRIGHT_TEST_BASE_URL="$BASE_URL" $VERIFY_E2E_TESTS \
               >/tmp/claude/verify-E2E.log 2>&1; then
-            gh issue comment "$ISSUE_NUMBER" --body "E2E still failing after debug attempt. Labeling \`$TRIGGER_STUCK_LABEL\`."
-            gh issue edit "$ISSUE_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
+            gh pr comment "$PR_NUMBER" --body "E2E still failing after debug attempt. Labeling \`$TRIGGER_STUCK_LABEL\`."
+            gh pr edit "$PR_NUMBER" --add-label "$TRIGGER_STUCK_LABEL"
             exit 1
           fi
           echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
@@ -486,7 +552,6 @@ jobs:
         id: final_url
         run: |
           set -euo pipefail
-          # Fallback chain: e2e_2 base_url (if attempt 2 ran) → preview.preview_url → e2e_1 base_url → localhost
           URL="${{ steps.e2e_2.outputs.base_url }}"
           if [ -z "$URL" ]; then URL="${{ steps.preview.outputs.preview_url }}"; fi
           if [ -z "$URL" ]; then URL="${{ steps.e2e_1.outputs.base_url }}"; fi
@@ -503,7 +568,7 @@ jobs:
               "${{ steps.final_url.outputs.base_url }}" \
               .claude/ui-routes.json \
               /tmp/claude/screenshots
-            ARTIFACT_NAME="screenshots-${ISSUE_NUMBER}-$(date +%s)"
+            ARTIFACT_NAME="screenshots-iter-${PR_NUMBER}-$(date +%s)"
             echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> "$GITHUB_ENV"
           else
             echo "No UI files changed; skipping screenshots."
@@ -536,6 +601,7 @@ jobs:
             printf '\n📦 [Download screenshot artifact (.zip)](%s)\n' "$ARTIFACT_URL"
           } > /tmp/claude/screenshots/pr-comment.md
           gh pr comment "$BRANCH" --body-file /tmp/claude/screenshots/pr-comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/claude/screenshots/comment.md
 
       - name: Final verification gate
         run: |
@@ -544,9 +610,19 @@ jobs:
           eval "$VERIFY_LINT"
           eval "$VERIFY_UNIT_TESTS"
 
-      - name: Flip PR ready and post green comment
+      - name: Mode A finalizer (respond)
+        if: env.MODE == 'respond'
         run: |
           set -euo pipefail
-          gh pr ready "$BRANCH"
           PREVIEW_URL="${{ steps.preview.outputs.preview_url }}"
-          gh pr comment "$BRANCH" --body "Verification green. Preview: ${PREVIEW_URL:-localhost}. \`@claude\` for tweaks, or apply \`$TRIGGER_CHANGES_LABEL\`."
+          INSTRUCTION_HEAD=$(head -c 500 /tmp/claude/instruction.md)
+          gh pr comment "$PR_NUMBER" --body "$(printf 'Done. Preview: %s\n\n_Applied your request:_\n\n> %s' "${PREVIEW_URL:-localhost}" "$INSTRUCTION_HEAD")"
+
+      - name: Mode B finalizer (address-feedback)
+        if: env.MODE == 'address-feedback'
+        run: |
+          set -euo pipefail
+          gh pr edit "$PR_NUMBER" --remove-label "$TRIGGER_CHANGES_LABEL"
+          THREAD_COUNT=$(jq 'length' /tmp/claude/review-threads.json)
+          PREVIEW_URL="${{ steps.preview.outputs.preview_url }}"
+          gh pr comment "$PR_NUMBER" --body "$(printf 'Addressed %d unresolved review thread(s). Preview: %s. Re-review when ready.' "$THREAD_COUNT" "${PREVIEW_URL:-localhost}")"
