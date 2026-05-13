@@ -96,7 +96,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: ./.github/actions/claude-sdlc-config
+      - uses: kolodii-ivan/claude-sdlc-kit/.github/actions/claude-sdlc-config@v1
 
       - name: Compute slug, branch, today
         id: vars

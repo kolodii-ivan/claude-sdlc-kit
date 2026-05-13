@@ -41,7 +41,7 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.client_payload.branch || github.event.inputs.branch }}
 
-      - uses: ./.github/actions/claude-sdlc-config
+      - uses: kolodii-ivan/claude-sdlc-kit/.github/actions/claude-sdlc-config@v1
 
       - name: Configure git identity
         run: |
@@ -335,7 +335,7 @@ jobs:
 
       - name: Preview wait
         id: preview
-        uses: ./.github/actions/preview-wait-vercel
+        uses: kolodii-ivan/claude-sdlc-kit/.github/actions/preview-wait-vercel@v1
         with:
           commit_sha: ${{ steps.sha_pre_preview.outputs.sha }}
           timeout_min: ${{ env.PREVIEW_WAIT_TIMEOUT }}
@@ -458,7 +458,7 @@ jobs:
       - name: Re-wait preview after fix
         if: steps.e2e_1.outputs.failed == 'true'
         id: preview_after_fix
-        uses: ./.github/actions/preview-wait-vercel
+        uses: kolodii-ivan/claude-sdlc-kit/.github/actions/preview-wait-vercel@v1
         with:
           commit_sha: ${{ steps.sha_after_debug.outputs.sha }}
           timeout_min: ${{ env.PREVIEW_WAIT_TIMEOUT }}
