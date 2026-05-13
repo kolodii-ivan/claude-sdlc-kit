@@ -5,6 +5,12 @@ on:
   repository_dispatch:
     types: [spec-ready]
 
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
 jobs:
   implement:
     uses: kolodii-ivan/claude-sdlc-kit/.github/workflows/implement.yml@__PIN__
