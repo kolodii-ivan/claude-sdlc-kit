@@ -1,0 +1,13 @@
+{
+  "name": "claude-sdlc-kit",
+  "description": "Brainstorm → spec → plan → TDD-implement → review pipeline driven by GitHub Issues + Claude",
+  "version": "0.0.0",
+  "author": {
+    "name": "Ivan Kolodii",
+    "email": "pothuyjohn@gmail.com"
+  },
+  "homepage": "https://github.com/kolodii-ivan/claude-sdlc-kit",
+  "repository": "https://github.com/kolodii-ivan/claude-sdlc-kit",
+  "license": "MIT",
+  "keywords": ["claude", "sdlc", "github-actions", "automation"]
+}
