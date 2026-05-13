@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - main
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Set version (tagged release)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          (cd packages/cli && npm version "$VERSION" --no-git-tag-version)
+
+      - name: Set version (beta build)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          BASE=$(node -p "require('./packages/cli/package.json').version")
+          BETA_VERSION="$BASE-beta.$(date -u +%Y%m%d%H%M)"
+          (cd packages/cli && npm version "$BETA_VERSION" --no-git-tag-version)
+
+      - name: Publish (tagged)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: cd packages/cli && npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish (beta)
+        if: github.ref == 'refs/heads/main'
+        run: cd packages/cli && npm publish --access public --tag beta
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Update rolling major tag (e.g. v1)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          MAJOR=$(echo "${GITHUB_REF_NAME#v}" | cut -d. -f1)
+          git config user.email "noreply@github.com"
+          git config user.name  "github-actions[bot]"
+          git tag -f "v$MAJOR" "$GITHUB_SHA"
+          git push -f origin "v$MAJOR"
+
+      - name: Update rolling beta tag
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.email "noreply@github.com"
+          git config user.name  "github-actions[bot]"
+          git tag -f "beta" "$GITHUB_SHA"
+          git push -f origin "beta"
