@@ -19,11 +19,13 @@
   "files": [
     "bin/",
     "src/",
-    "templates/"
+    "templates/",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "prepack": "rm -rf templates && cp -R ../../templates templates"
+    "prepack": "rm -rf templates && cp -R ../../templates templates && cp ../../README.md ../../LICENSE ."
   },
   "keywords": [
     "claude",
