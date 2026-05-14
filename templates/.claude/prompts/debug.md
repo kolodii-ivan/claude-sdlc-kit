@@ -16,11 +16,14 @@ A verification step failed. The captured failure log is at `$FAILURE_LOG_PATH`.
 ## Constraints
 
 - One commit per debug invocation. The workflow re-runs verification and re-invokes you if it still fails (capped — see workflow).
-- Use whatever standard shell tooling you need to navigate and edit the codebase (git, npm, npx, jest, playwright, node, find, grep, ls, etc.).
+- Use standard shell tooling to navigate/inspect (git, npx, jest, playwright, node, find, grep, ls). Run the failing command locally to reproduce.
 - **Never** run `git push` — the workflow handles all pushes.
 - **Never** run `gh` commands — the workflow handles all PR/issue interactions.
+- **Never** run `npm install`, `npm update`, `npm dedupe`, `npm audit fix`, or any command that writes to `package.json` / `package-lock.json`. Missing/extraneous deps are NOT the typical root cause of a verify failure — investigate the actual error first. If a real dependency change is truly required, exit without committing and the workflow will escalate.
+- **Do NOT modify `package.json`, `package-lock.json`, `tsconfig.json`, or `eslint.config.*`** unless the failure log explicitly names one of those files as the broken source. Config files are stable infrastructure; the root cause of a test/typecheck failure is almost always in *application code*, not in build/test config.
 - **Do NOT modify, delete, or stage files under `.claude/`** — that directory holds workflow runtime state (iteration counters, prompts, config) owned by the SDLC kit. Even if a `wip:` commit looks like junk, leave it alone.
-- If you can't determine the root cause, write your best hypothesis to `/tmp/claude/hypothesis.md` and exit *without* committing. The workflow will surface your hypothesis in the stuck-comment.
+- **Scope discipline:** make the minimum change that fixes the failure. Touch only the files implicated by the failure log. If you find yourself "also fixing" unrelated things, stop — those don't belong in this debug commit. If your change spans more than 2-3 files, you are probably over-correcting; reset and try a narrower fix.
+- If you can't determine the root cause, write your best hypothesis to `/tmp/claude/hypothesis.md` and exit *without* committing. The workflow will surface your hypothesis in the stuck-comment so a human can pick up where you left off — that's a *valid outcome*, not a failure.
 
 ## Context supplied by workflow
 
